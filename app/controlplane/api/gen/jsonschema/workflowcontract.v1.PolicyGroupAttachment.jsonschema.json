@@ -4,6 +4,10 @@
   "additionalProperties": false,
   "description": "Represents a group attachment in a contract",
   "properties": {
+    "gate": {
+      "description": "gate mode for all policies loaded through this group attachment.\n if unset, policy-level and organization defaults are used.",
+      "type": "boolean"
+    },
     "ref": {
       "description": "Group reference, it might be an URL or a provider reference",
       "minLength": 1,

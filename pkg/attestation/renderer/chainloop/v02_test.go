@@ -1,5 +1,5 @@
 //
-// Copyright 2024-2025 The Chainloop Authors.
+// Copyright 2024-2026 The Chainloop Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -102,6 +102,105 @@ func TestRenderV02(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Equal(t, string(wantRaw), string(gotRawStatement))
+		})
+	}
+}
+
+func TestPredicatePolicyBlockingBehavior(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name                 string
+		policyEvaluations    []*api.PolicyEvaluation
+		bypass               bool
+		blockOnViolation     bool
+		wantBlocked          bool
+		wantGatedViolations  bool
+		wantHasViolationsAny bool
+	}{
+		{
+			name: "gated violation blocks when bypass disabled",
+			policyEvaluations: []*api.PolicyEvaluation{
+				{
+					Name:       "gated-policy",
+					Gate:       true,
+					Violations: []*api.PolicyEvaluation_Violation{{Message: "boom"}},
+				},
+			},
+			bypass:               false,
+			blockOnViolation:     false,
+			wantBlocked:          true,
+			wantGatedViolations:  true,
+			wantHasViolationsAny: true,
+		},
+		{
+			name: "gated violation does not block when bypass enabled",
+			policyEvaluations: []*api.PolicyEvaluation{
+				{
+					Name:       "gated-policy",
+					Gate:       true,
+					Violations: []*api.PolicyEvaluation_Violation{{Message: "boom"}},
+				},
+			},
+			bypass:               true,
+			blockOnViolation:     false,
+			wantBlocked:          false,
+			wantGatedViolations:  true,
+			wantHasViolationsAny: true,
+		},
+		{
+			name: "non gated violation blocks in enforced mode",
+			policyEvaluations: []*api.PolicyEvaluation{
+				{
+					Name:       "advisory-policy",
+					Gate:       false,
+					Violations: []*api.PolicyEvaluation_Violation{{Message: "boom"}},
+				},
+			},
+			bypass:               false,
+			blockOnViolation:     true,
+			wantBlocked:          true,
+			wantGatedViolations:  false,
+			wantHasViolationsAny: true,
+		},
+		{
+			name: "non gated violation does not block in advisory mode",
+			policyEvaluations: []*api.PolicyEvaluation{
+				{
+					Name:       "advisory-policy",
+					Gate:       false,
+					Violations: []*api.PolicyEvaluation_Violation{{Message: "boom"}},
+				},
+			},
+			bypass:               false,
+			blockOnViolation:     false,
+			wantBlocked:          false,
+			wantGatedViolations:  false,
+			wantHasViolationsAny: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			att := &api.Attestation{
+				PolicyEvaluations:      tc.policyEvaluations,
+				BypassPolicyCheck:      tc.bypass,
+				BlockOnPolicyViolation: tc.blockOnViolation,
+			}
+			renderer := NewChainloopRendererV02(att, "dev", "sha256:deadbeef", nil, nil)
+
+			predicate, err := renderer.predicate()
+			require.NoError(t, err)
+
+			predicateMap := predicate.AsMap()
+			assert.Equal(t, tc.wantBlocked, predicateMap["policyAttBlocked"])
+			assert.Equal(t, tc.wantHasViolationsAny, predicateMap["policyHasViolations"])
+
+			gotGatedViolations := false
+			if raw, ok := predicateMap["policyHasGatedViolations"]; ok {
+				gotGatedViolations = raw.(bool)
+			}
+			assert.Equal(t, tc.wantGatedViolations, gotGatedViolations)
 		})
 	}
 }

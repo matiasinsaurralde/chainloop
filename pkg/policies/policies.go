@@ -192,6 +192,8 @@ type evalOpts struct {
 	kind v1.CraftingSchema_Material_MaterialType
 	// Argument bindings for policy evaluations
 	bindings map[string]string
+	// Optional gate default coming from a policy group attachment.
+	groupGate *bool
 }
 
 // shouldEvaluateAtPhase checks if a policy should be evaluated at the given phase.
@@ -345,20 +347,25 @@ func (pv *PolicyVerifier) evaluatePolicyAttachment(ctx context.Context, attachme
 		SkipReasons:  reasons,
 		Requirements: attachment.Requirements,
 		RawResults:   engineRawResultsToAPIRawResults(rawResults),
-		Gate:         policyAttachmentGate(attachment, pv.defaultGate),
+		Gate:         policyAttachmentGate(attachment, opts.groupGate, pv.defaultGate),
 	}, nil
 }
 
-func policyAttachmentGate(attachment *v1.PolicyAttachment, defaultGate bool) bool {
+func policyAttachmentGate(attachment *v1.PolicyAttachment, groupGate *bool, defaultGate bool) bool {
+	effectiveDefault := defaultGate
+	if groupGate != nil {
+		effectiveDefault = *groupGate
+	}
+
 	if attachment == nil {
-		return defaultGate
+		return effectiveDefault
 	}
 
 	if attachment.Gate != nil {
 		return attachment.GetGate()
 	}
 
-	return defaultGate
+	return effectiveDefault
 }
 
 // ComputeArguments takes a list of arguments, and matches it against the expected inputs. It also applies a set of interpolations if needed.

@@ -1442,48 +1442,77 @@ func (s *testSuite) TestPolicyAttachmentGate() {
 	cases := []struct {
 		name         string
 		attachment   *v12.PolicyAttachment
+		groupGate    *bool
 		defaultGate  bool
 		expectedGate bool
 	}{
 		{
 			name:         "nil attachment falls back to default true",
 			attachment:   nil,
+			groupGate:    nil,
 			defaultGate:  true,
 			expectedGate: true,
 		},
 		{
 			name:         "unset gate inherits default false",
 			attachment:   &v12.PolicyAttachment{},
+			groupGate:    nil,
 			defaultGate:  false,
 			expectedGate: false,
 		},
 		{
 			name:         "unset gate inherits default true",
 			attachment:   &v12.PolicyAttachment{},
+			groupGate:    nil,
 			defaultGate:  true,
 			expectedGate: true,
+		},
+		{
+			name:         "group gate true overrides default false",
+			attachment:   &v12.PolicyAttachment{},
+			groupGate:    &trueGate,
+			defaultGate:  false,
+			expectedGate: true,
+		},
+		{
+			name:         "group gate false overrides default true",
+			attachment:   &v12.PolicyAttachment{},
+			groupGate:    &falseGate,
+			defaultGate:  true,
+			expectedGate: false,
 		},
 		{
 			name: "explicit gate false overrides default true",
 			attachment: &v12.PolicyAttachment{
 				Gate: &falseGate,
 			},
+			groupGate:    nil,
 			defaultGate:  true,
 			expectedGate: false,
 		},
 		{
-			name: "explicit gate true overrides default false",
+			name: "explicit gate true overrides default false and group gate false",
 			attachment: &v12.PolicyAttachment{
 				Gate: &trueGate,
 			},
+			groupGate:    &falseGate,
 			defaultGate:  false,
 			expectedGate: true,
+		},
+		{
+			name: "explicit gate false overrides group gate true",
+			attachment: &v12.PolicyAttachment{
+				Gate: &falseGate,
+			},
+			groupGate:    &trueGate,
+			defaultGate:  true,
+			expectedGate: false,
 		},
 	}
 
 	for _, tc := range cases {
 		s.Run(tc.name, func() {
-			got := policyAttachmentGate(tc.attachment, tc.defaultGate)
+			got := policyAttachmentGate(tc.attachment, tc.groupGate, tc.defaultGate)
 			s.Equal(tc.expectedGate, got)
 		})
 	}

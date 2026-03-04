@@ -265,6 +265,7 @@ func (s *groupsTestSuite) TestVerifyStatement() {
 				for _, pol := range res {
 					violations += len(pol.Violations)
 					s.Equal(tc.groupName, pol.GroupReference.GetName())
+					s.False(pol.Gate)
 				}
 				s.Equal(tc.violations, violations)
 			}
@@ -644,6 +645,177 @@ func (s *groupsTestSuite) TestAttestationPhaseFilteringInGroups() {
 			res, err := verifier.VerifyStatement(context.TODO(), statement)
 			s.Require().NoError(err)
 			s.Len(res, tc.npolicies)
+		})
+	}
+}
+
+func (s *groupsTestSuite) TestGroupAttachmentGateAffectsStatementEvaluations() {
+	trueGate := true
+	falseGate := false
+
+	cases := []struct {
+		name         string
+		groupGate    *bool
+		defaultGate  bool
+		expectedGate bool
+	}{
+		{
+			name:         "group gate unset inherits default false",
+			groupGate:    nil,
+			defaultGate:  false,
+			expectedGate: false,
+		},
+		{
+			name:         "group gate unset inherits default true",
+			groupGate:    nil,
+			defaultGate:  true,
+			expectedGate: true,
+		},
+		{
+			name:         "group gate true overrides default false",
+			groupGate:    &trueGate,
+			defaultGate:  false,
+			expectedGate: true,
+		},
+		{
+			name:         "group gate false overrides default true",
+			groupGate:    &falseGate,
+			defaultGate:  true,
+			expectedGate: false,
+		},
+	}
+
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			schema := &v1.CraftingSchema{
+				PolicyGroups: []*v1.PolicyGroupAttachment{
+					{
+						Ref:  "file://testdata/policy_group.yaml",
+						Gate: tc.groupGate,
+					},
+				},
+			}
+
+			verifier := NewPolicyGroupVerifier(schema.GetPolicyGroups(), nil, nil, &s.logger, WithDefaultGate(tc.defaultGate))
+			statement := loadStatement("testdata/statement.json", &s.Suite)
+
+			evs, err := verifier.VerifyStatement(context.Background(), statement)
+			s.Require().NoError(err)
+			s.Require().Len(evs, 1)
+			s.Equal(tc.expectedGate, evs[0].Gate)
+		})
+	}
+}
+
+func (s *groupsTestSuite) TestGroupAttachmentGateAffectsMaterialEvaluations() {
+	trueGate := true
+	falseGate := false
+
+	cases := []struct {
+		name         string
+		groupGate    *bool
+		defaultGate  bool
+		expectedGate bool
+	}{
+		{
+			name:         "group gate unset inherits default false",
+			groupGate:    nil,
+			defaultGate:  false,
+			expectedGate: false,
+		},
+		{
+			name:         "group gate unset inherits default true",
+			groupGate:    nil,
+			defaultGate:  true,
+			expectedGate: true,
+		},
+		{
+			name:         "group gate true overrides default false",
+			groupGate:    &trueGate,
+			defaultGate:  false,
+			expectedGate: true,
+		},
+		{
+			name:         "group gate false overrides default true",
+			groupGate:    &falseGate,
+			defaultGate:  true,
+			expectedGate: false,
+		},
+	}
+
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			schema := &v1.CraftingSchema{
+				PolicyGroups: []*v1.PolicyGroupAttachment{
+					{
+						Ref:  "file://testdata/policy_group_multikind.yaml",
+						Gate: tc.groupGate,
+					},
+				},
+			}
+
+			material := &api.Attestation_Material{
+				M: &api.Attestation_Material_Artifact_{Artifact: &api.Attestation_Material_Artifact{
+					Content: []byte(`{"specVersion":"1.4"}`),
+				}},
+				MaterialType: v1.CraftingSchema_Material_OPENVEX,
+				InlineCas:    true,
+			}
+
+			verifier := NewPolicyGroupVerifier(schema.GetPolicyGroups(), nil, nil, &s.logger, WithDefaultGate(tc.defaultGate))
+			evs, err := verifier.VerifyMaterial(context.Background(), material, "")
+			s.Require().NoError(err)
+			s.Require().Len(evs, 1)
+			s.Equal(tc.expectedGate, evs[0].Gate)
+		})
+	}
+}
+
+func (s *groupsTestSuite) TestPolicyAttachmentGateOverridesGroupGate() {
+	trueGate := true
+	falseGate := false
+
+	cases := []struct {
+		name             string
+		groupRef         string
+		groupGate        *bool
+		defaultGate      bool
+		expectedEvalGate bool
+	}{
+		{
+			name:             "explicit policy gate false overrides group gate true",
+			groupRef:         "file://testdata/policy_group_attestation_gate_false.yaml",
+			groupGate:        &trueGate,
+			defaultGate:      true,
+			expectedEvalGate: false,
+		},
+		{
+			name:             "explicit policy gate true overrides group gate false",
+			groupRef:         "file://testdata/policy_group_attestation_gate_true.yaml",
+			groupGate:        &falseGate,
+			defaultGate:      false,
+			expectedEvalGate: true,
+		},
+	}
+
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			schema := &v1.CraftingSchema{
+				PolicyGroups: []*v1.PolicyGroupAttachment{
+					{
+						Ref:  tc.groupRef,
+						Gate: tc.groupGate,
+					},
+				},
+			}
+
+			verifier := NewPolicyGroupVerifier(schema.GetPolicyGroups(), nil, nil, &s.logger, WithDefaultGate(tc.defaultGate))
+			statement := loadStatement("testdata/statement.json", &s.Suite)
+
+			evs, err := verifier.VerifyStatement(context.Background(), statement)
+			s.Require().NoError(err)
+			s.Require().Len(evs, 1)
+			s.Equal(tc.expectedEvalGate, evs[0].Gate)
 		})
 	}
 }

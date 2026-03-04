@@ -382,6 +382,9 @@ message PolicyGroupAttachment {
   map<string, string> with = 2;
   // policy names to skip (matched against metadata.name)
   repeated string skip = 3;
+  // gate mode for all policies loaded through this group attachment.
+  // if unset, policy-level and organization defaults are used.
+  optional bool gate = 4;
 }
 
 // Represents a group or policies

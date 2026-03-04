@@ -1,5 +1,5 @@
 //
-// Copyright 2024-2025 The Chainloop Authors.
+// Copyright 2024-2026 The Chainloop Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -52,6 +52,8 @@ func (pgv *PolicyGroupVerifier) VerifyMaterial(ctx context.Context, material *ap
 	groupAtts := pgv.policyGroups
 
 	for _, groupAtt := range groupAtts {
+		groupGate := groupAttachmentGate(groupAtt)
+
 		// 1. load the policy group
 		group, desc, err := LoadPolicyGroup(ctx, groupAtt, &LoadPolicyGroupOptions{
 			Client: pgv.client,
@@ -92,7 +94,7 @@ func (pgv *PolicyGroupVerifier) VerifyMaterial(ctx context.Context, material *ap
 			}
 
 			ev, err := pgv.evaluatePolicyAttachment(ctx, policyAtt, subject,
-				&evalOpts{kind: material.MaterialType, name: material.GetId(), bindings: groupArgs},
+				&evalOpts{kind: material.MaterialType, name: material.GetId(), bindings: groupArgs, groupGate: groupGate},
 			)
 			if err != nil {
 				return nil, NewPolicyError(err)
@@ -121,6 +123,8 @@ func (pgv *PolicyGroupVerifier) VerifyStatement(ctx context.Context, statement *
 	result := make([]*api.PolicyEvaluation, 0)
 	attachments := pgv.policyGroups
 	for _, groupAtt := range attachments {
+		groupGate := groupAttachmentGate(groupAtt)
+
 		group, desc, err := LoadPolicyGroup(ctx, groupAtt, &LoadPolicyGroupOptions{
 			Client: pgv.client,
 			Logger: pgv.logger,
@@ -155,7 +159,7 @@ func (pgv *PolicyGroupVerifier) VerifyStatement(ctx context.Context, statement *
 			}
 
 			ev, err := pgv.evaluatePolicyAttachment(ctx, attachment, material,
-				&evalOpts{kind: v1.CraftingSchema_Material_ATTESTATION, bindings: groupArgs},
+				&evalOpts{kind: v1.CraftingSchema_Material_ATTESTATION, bindings: groupArgs, groupGate: groupGate},
 			)
 			if err != nil {
 				return nil, NewPolicyError(err)
@@ -179,6 +183,15 @@ func (pgv *PolicyGroupVerifier) VerifyStatement(ctx context.Context, statement *
 	}
 
 	return result, nil
+}
+
+func groupAttachmentGate(group *v1.PolicyGroupAttachment) *bool {
+	if group == nil || group.Gate == nil {
+		return nil
+	}
+
+	gate := group.GetGate()
+	return &gate
 }
 
 type LoadPolicyGroupOptions struct {
