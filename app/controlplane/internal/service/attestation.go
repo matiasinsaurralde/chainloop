@@ -131,6 +131,18 @@ func (s *AttestationService) GetContract(ctx context.Context, req *cpAPI.Attesta
 		return nil, handleUseCaseErr(err, s.log)
 	}
 
+	// Authorize the caller on the target project before returning any workflow/contract data.
+	// This endpoint bypasses the standard authz middleware (attestation endpoints authenticate via
+	// the attestation-JWT middleware), so this in-handler check is the only authorization control.
+	// The sibling endpoints (Init/Store/Cancel/GetUploadCreds) all call userHasPermissionOnProject;
+	// without it a project-scoped token could read another project's workflow definition and private
+	// contract schema. findWorkflowFromTokenOrNameOrRunID resolves the workflow org-scoped, and its
+	// only token-scope check keys off WorkflowID (nil for project-scoped tokens), so it does not
+	// enforce project scope on its own.
+	if _, err = s.userHasPermissionOnProject(ctx, robotAccount.OrgID, &cpAPI.IdentityReference{Name: &req.ProjectName}, authz.PolicyWorkflowRead); err != nil {
+		return nil, err
+	}
+
 	// Find contract revision
 	contractVersion, err := s.workflowContractUseCase.Describe(ctx, wf.OrgID.String(), wf.ContractID.String(), int(req.ContractRevision), biz.WithoutReferences())
 	if err != nil {
