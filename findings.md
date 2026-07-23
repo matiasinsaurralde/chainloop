@@ -185,5 +185,44 @@ Lead 18 (536bc1aed), related to Leads 16/17.
 ## Cross-tenant isolation review (org A → org B)
 
 Reviewed for cross-**organization** exfiltration (distinct from the intra-org
-cross-project issue in Finding 1). Results are recorded in the section below the
-findings once the review completes.
+cross-project issue in Finding 1). **Result: no cross-org exfiltration found.**
+Every read/describe/download path that accepts an attacker-controlled ID or digest
+is bounded to the caller's authenticated org — by an org-scoped query, a post-fetch
+`OrgID` comparison, or a membership-derived org list.
+
+### Digest-based lookups (highest-risk exfil vector) — all org-bounded
+- **CAS artifact download** (`CASCredentialsService.Get`,
+  `CASRedirectService.GetDownloadURL`, `WorkflowRunService.resolvePolicyEvaluations`):
+  the `orgs` slice is built exclusively from the caller — `[]uuid.UUID{orgID}` with
+  `orgID = currentOrg` (`cascredential.go:123`, `casredirect.go:91`,
+  `workflowrun.go:109`), or from the user's own memberships via
+  `GetOrgsAndRBACInfoForUser` (`casmapping.go:102`). `FindByDigestInOrgs` ANDs each
+  digest match with `casmapping.OrganizationID(o)` (`data/casmapping.go:108-120`).
+  (This is the same lookup as Finding 1; the org bound is intact — only the *project*
+  filter within the org is missing.)
+- **WorkflowRun by digest** (`GetByDigestInOrg`): repo `FindByAttestationDigest` is
+  unscoped, but the biz layer rejects with
+  `if wfrun.Workflow.OrgID != orgUUID { return NotFound }` (`biz/workflowrun.go:649`).
+- **Referrer `DiscoverPrivate`**: user path uses memberships only
+  (`biz/referrer.go:175`); token path passes `[]uuid.UUID{orgUUID}` from `currentOrg`
+  (`service/referrer.go:87`); data layer bounds every query with
+  `workflow.HasOrganizationWith(organization.IDIn(orgIDs...))` (`data/referrer.go:167,335`).
+
+### ID-based lookups — all org-scoped or post-checked
+`WorkflowRun View by ID` (`GetByIDInOrg` → `orgScopedQuery`), `Workflow View`
+(`FindByNameInOrg`), `Contract Describe` (`FindByNameInOrg` + `Describe(currentOrg.ID)`),
+`Group Get` (`FindByOrgAndID`), `Project ListMembers` (`userHasPermissionOnProject`
++ `ListMembers(orgUUID)`), `API token Get` (`FindByIDInOrg(currentOrg.ID)`),
+`CAS backend Update/Delete/Revalidate` (`FindByNameInOrg(currentOrg.ID)`),
+`Org invitation Revoke` (unscoped `FindByID` + `if m.Org.ID != orgID { NotFound }`).
+
+### Defense-in-depth note (not a live finding)
+`OrgInvitationUseCase.AcceptInvitation` and `OrgInvitationUseCase.FindByID`
+(`biz/orginvitation.go:339,351`) are org-unscoped and would invert the tenant check,
+but are **not wired to any RPC** (no service caller — only test references). They are
+inert relative to the tenant boundary today; maintainers should keep them unexposed
+or add org-scoping before wiring them to any endpoint. Similarly, several other
+unscoped `FindByID` helpers (`CASBackendUseCase.Delete`/`PerformValidation`,
+`RobotAccount`/`APIToken` auth-middleware lookups, `WorkflowContractUseCase.FindVersionByID`)
+are reached only with IDs already resolved from an org-scoped lookup or from the
+caller's own signed credential, so they do not accept a cross-org reference.
