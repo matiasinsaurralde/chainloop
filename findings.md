@@ -36,7 +36,8 @@ Common root cause: authorization stops at the ORG boundary and treats PROJECT sc
 | 4/10 | referrer.go type-assertion 500 (recovered); attestation-state CAS bypass | LOW | CONFIRMED (bounded) | authenticated |
 | 5 | Policy/resource loader SSRF + env:// (CLIENT/CI-side, not control-plane) | MED (CI) | Plausible | contract/group author |
 
-Pending verification (agents running): #11 invitation-hijack sub-chain + IdP matrix (W3-1b); control-plane SSRF via integrations/CAS-backend (W2-7b); cache revocation-lag / key-collision (W3-2b).
+Also confirmed: #12 low-priv control-plane SSRF (integration plugins) — see table; #13 fail-open attestation verification (forgery enabler); #14 forgeable compliance status + premature release-freeze; #8/#9/#10 CAS write-skew / Store replay / attestation-state bypass. All verification threads RESOLVED (no agents pending).
+**Honest caps (adversarial):** #6 forgery does NOT bypass a server-enforced gate (all gates client-side); #7 crash is race-gated (opportunistic, not single-shot); #11 standalone takeover is IdP-dependent (invitation-hijack + email-recycling are not).
 
 Notable NEGATIVES (hardened / refuted — don't re-chase): JWT alg/aud confusion; YAML/JSON bombs (yaml.v2 + protojson depth caps); jsonfilter SQLi (anchored allowlist + parameterized); mass-assignment; grpc-web CORS (Bearer-only, no cookie auth); operation-string confusion; DSSE/structpb parse crash (RecursionLimit=10000); cross-tenant secret theft (org-namespaced+random); pprof fallthrough (hardened); managed-backend cross-ORG isolation; referrer graph cross-tenant; released-version immutability; membership double-accept.
 
@@ -189,6 +190,14 @@ The CAS access token (ES512 JWT minted by control-plane) carries `{Role, StoredS
 **Latent note (F2):** service.go:351-352 checkPolicy hardcodes PolicyOrganizationCreate instead of param (harmless today). IsAdmin() bypass in middleware.go:65 backstopped by service-layer owner re-checks — fragile.
 </details>
 
+### FINDING #13 [MED — CONFIRMED (W3-3)] Fail-open attestation signature verification (forgery enabler for #6)
+`WorkflowRunUseCase.SaveAttestation` → `verifyBundle` (workflowrun.go:464-476, 583-610) is the ONLY server-side bundle verification, and it FAILS OPEN: returns nil (skip) if `GetTrustedRoot`==ErrNotImplemented (no signing backend configured) OR `VerifyBundle`==ErrMissingVerificationMaterial (bundle has no cert AND no public key — verifier.go:80-82). So an attacker submits a bundle with NO verification material → verification silently skipped → attestation stored/indexed as authoritative. Even when it runs+passes, it only proves "some chainloop cert signed this envelope" — NOT bound to the target project/workflow. This is the enabling weakness behind #6's forgery. Fix: fail closed when a signing backend is configured; bind signer identity to the target org/project.
+
+### FINDING #14 [MED — CONFIRMED (W3-3)] Forgeable compliance status + premature release-freeze (integrity/DoS)
+Server persists policy PASSED/violations status DERIVED FROM UNVERIFIED predicate content (workflowrun.go:504-507; client-set fields v02.go:262-289) and displays it in UI/API/filters — the actual block gate (`BlockOnPolicyViolation`) is CLIENT-side only (crafter.go:785+, cli push). So forged attestations show "PASSED"/no-violations (misleading compliance signal). Separately, `req.MarkVersionAsReleased` (a request bool, NOT content, NOT gated on policy pass; attestation.go:396-401 → projectversion.go:139-150) flips a version to `released`; if org has `BlockAttestationsOnReleasedVersions`, further attestations are rejected (data/workflowrun.go:303-325) → attacker can **prematurely FREEZE a victim's version** with forged content (integrity/DoS + misleading release marker).
+
+### W3-3 BOUNDING NEGATIVE (caps #6 severity — honest): The control-plane enforces NO server-side security gate that trusts attestation content. All policy/compliance gates are CLIENT-side; referrer graph is discovery-only + RBAC-scoped at read (no authz decision); CAS mappings are content-addressed + org/project-scoped (poisoned mapping can't serve DIFFERENT content for a digest, no cross-tenant read); materials parsed for indexing/fan-out only, not decisions. So #6 forgery blast radius = evidence-store pollution + misleading compliance/release UI + downstream-integration (own-org) pollution, until a client verifies at read time. It does NOT clear a server-enforced control. (Confirms #6's RBAC-skip mechanism: service.go:392-402, 267-269.)
+
 ### FINDING #8 [MED — CONFIRMED (W2-4)] CAS default/fallback/inline flag write-skew → org-wide attestation Init DoS
 No partial unique index for "one default backend per org"; invariant enforced by clear-then-set in app code (data/casbackend.go:145-178, 205-266). Under READ COMMITTED, two concurrent Create/Update(default=true) write-skew → two defaults. FindDefaultBackend uses `.Only()` (data/casbackend.go:71) → "not singular" error → every attestation Init for that org fails (attestation.go:188) until admin fixes. Same-org availability; needs CAS-admin. Fix: partial unique index `WHERE default=true` per org.
 
@@ -283,6 +292,9 @@ Diverse portfolio across F1–F10. Key outcomes:
 - **Auto-onboarding org membership**: config-driven (admin OnboardingSpec), not attacker-controlled. Intended.
 - **Group service authz**: quick scan — mutating methods (AddMember/RemoveMember/UpdateMemberMaintainerStatus) each call group-scoped permission check before mutating, scope by currentOrg. No obvious gap (matches F2).
 - **pprof / JSON depth (Go 1.26) / yaml.v2 bombs**: all mitigated (see Finding #1 refutation + pprof hardening).
+
+### Wave 3 — COMPLETE (W3-1b OIDC, W2-7b SSRF, W3-2b caching, W3-3 attestation-trust)
+All confirmed/refuted as recorded. FINAL: 5 HIGH (SSRF #12, CAS-IDOR #2, robot-RBAC #6, OIDC/invite-hijack #11 [IdP/invite-dependent], + verification fail-open #13 supporting #6), 1 MED-DoS (#7 race-gated), plus mediums #3/#8/#9/#12b/#14 and lows #4/#10/#5/prometheus/pprof/cache-revocation. Extensive verified negatives. Session-limit hit mid-Wave-3; failed agents retried successfully.
 
 ### Wave 2 — launching
 W2-1 crash-thread (goroutine panics), W2-2 CAS IDOR adversarial verify, W2-3 races/TOCTOU (F9), W2-4 grpc-web/CORS/HTTP-transcode/bytestream, W2-5 server-side DSSE/in-toto/proto-Struct library parsing bugs. (F2 RBAC still running.)
