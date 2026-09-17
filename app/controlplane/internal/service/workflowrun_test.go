@@ -17,6 +17,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 
@@ -97,6 +98,9 @@ func TestResolvePolicyEvaluations(t *testing.T) {
 		mappingErr error
 		// downloadBody is what the CAS download writes out
 		downloadBody []byte
+		// downloadExceedsCap models a transfer that overruns the cap: the bounded
+		// writer refuses the write and the CAS client surfaces a download error
+		downloadExceedsCap bool
 
 		wantNilResolution bool
 		wantEvaluations   bool
@@ -137,14 +141,49 @@ func TestResolvePolicyEvaluations(t *testing.T) {
 			wantDownloadCall:  true,
 		},
 		{
-			// An unrecorded size leaves nothing to enforce the cap against, and
-			// sizing the bundle would cost a CAS round trip on every view.
-			name:              "a reference with no recorded size is inlined whatever the cap",
-			maxInlineBytes:    4,
+			// With no recorded size the cap cannot be applied up front, but the
+			// download is still bounded, so a bundle under the cap inlines...
+			name:              "a reference with no recorded size under the cap is inlined",
 			downloadBody:      bundle,
 			wantEvaluations:   true,
 			wantMappingLookup: true,
 			wantDownloadCall:  true,
+		},
+		{
+			// ...and one that overruns the cap is refused mid-transfer rather than
+			// pulled into memory, even though it recorded no size. A zero or omitted
+			// size must never authorize an unbounded read (the View-API DoS regression).
+			name:               "a reference with no recorded size over the cap is bounded",
+			maxInlineBytes:     4,
+			downloadBody:       bundle,
+			downloadExceedsCap: true,
+			wantRefReason:      pb.PolicyEvaluationsRef_REASON_TOO_LARGE,
+			wantRefSize:        0,
+			wantMappingLookup:  true,
+			wantDownloadCall:   true,
+		},
+		{
+			// The recorded size is client-influenced (it travels in the attestation
+			// predicate), so a small claim must not be trusted to authorize an
+			// oversized transfer: the bound catches it regardless of the claim.
+			name:               "a small recorded size cannot authorize an oversized download",
+			bundleSize:         4,
+			maxInlineBytes:     8,
+			downloadBody:       bundle,
+			downloadExceedsCap: true,
+			wantRefReason:      pb.PolicyEvaluationsRef_REASON_TOO_LARGE,
+			wantRefSize:        0,
+			wantMappingLookup:  true,
+			wantDownloadCall:   true,
+		},
+		{
+			// A cached entry is size-checked too, so a lowered cap (or an entry
+			// written before the cap existed) is never served from cache unbounded.
+			name:           "a cached bundle over the cap is not inlined even without a recorded size",
+			seedCache:      bundle,
+			maxInlineBytes: 4,
+			wantRefReason:  pb.PolicyEvaluationsRef_REASON_TOO_LARGE,
+			wantRefSize:    int64(len(bundle)),
 		},
 		{
 			name:              "missing CAS mapping is not downloaded",
@@ -196,13 +235,26 @@ func TestResolvePolicyEvaluations(t *testing.T) {
 
 			casClient := bizMocks.NewCASClient(t)
 			if tc.wantDownloadCall {
+				var downloadErr error
+				if tc.downloadExceedsCap {
+					downloadErr = errors.New("content exceeds the maximum")
+				}
 				casClient.On("Download", mock.Anything, mock.Anything, mock.Anything, orgID, mock.Anything, testBundleDigest).
 					Run(func(args mock.Arguments) {
 						w, ok := args.Get(4).(io.Writer)
 						require.True(t, ok)
-						_, err := w.Write(tc.downloadBody)
+						n, err := w.Write(tc.downloadBody)
+						if tc.downloadExceedsCap {
+							// The bounded writer refuses the write that would overrun
+							// the cap and reports a short write, which the real CAS
+							// client surfaces as the download error returned below.
+							require.Error(t, err)
+							require.Less(t, n, len(tc.downloadBody))
+
+							return
+						}
 						require.NoError(t, err)
-					}).Return(nil)
+					}).Return(downloadErr)
 			}
 
 			mappingRepo := bizMocks.NewCASMappingRepo(t)

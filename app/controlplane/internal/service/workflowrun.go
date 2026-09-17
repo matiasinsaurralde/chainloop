@@ -121,14 +121,17 @@ func (s *WorkflowRunService) policyEvaluationsMaxInlineBytes() int64 {
 // reference, meaning the caller should keep whatever the predicate itself
 // holds.
 //
-// The cap is enforced against the size the descriptor records, which travels
-// signed with the predicate and costs no round trip. A bundle whose size is not
-// recorded is read in full, since sizing it would mean asking the CAS on every
-// view -- the very cost the recorded size exists to avoid.
+// The size the reference records gives a cheap fast-path rejection with no CAS
+// round trip, but it is not trusted as authoritative: it travels in the
+// attestation predicate (client-influenced) and backends may under-report. The
+// download is therefore always bounded to the cap as well, so a small, zero, or
+// missing claimed size can never authorize pulling an oversized bundle into
+// memory. Sizing the object up front (an extra CAS round trip on every view) is
+// deliberately avoided in favour of that bound.
 //
 // Anything that prevents inlining the bundle with confidence -- an oversized
-// bundle, an unreachable or undecodable object -- yields a reference rather
-// than the evaluations.
+// bundle (by claimed size or by bytes actually transferred), an unreachable or
+// undecodable object -- yields a reference rather than the evaluations.
 func (s *WorkflowRunService) resolvePolicyEvaluations(
 	ctx context.Context,
 	ref *chainloop.PolicyEvaluationsRef,
@@ -154,8 +157,14 @@ func (s *WorkflowRunService) resolvePolicyEvaluations(
 		return tooLargePolicyEvaluations(digest, bundleSize, mediaType)
 	}
 
-	// A cached bundle costs no CAS round trip.
+	// A cached bundle costs no CAS round trip. Guard its size all the same: the
+	// cap may have been lowered since the entry was written, and only under-cap
+	// bundles should ever be inlined.
 	if cached, found, err := s.policyEvalCache.Get(ctx, digest); err == nil && found {
+		if int64(len(cached)) > maxInlineBytes {
+			return tooLargePolicyEvaluations(digest, int64(len(cached)), mediaType)
+		}
+
 		return s.decodePolicyEvaluations(cached, digest, mediaType)
 	}
 
@@ -165,8 +174,22 @@ func (s *WorkflowRunService) resolvePolicyEvaluations(
 		return unavailablePolicyEvaluations(digest, bundleSize, mediaType)
 	}
 
-	buf := &bytes.Buffer{}
+	// Bound the transfer to the cap regardless of the size the reference claims.
+	// That size is not authoritative -- it travels in the attestation predicate,
+	// so it is client-influenced, and some backends under-report -- so a small or
+	// zero claimed size must never authorize an unbounded download into memory.
+	buf := &boundedBuffer{limit: maxInlineBytes}
 	err = s.casClient.Download(ctx, string(mapping.CASBackend.Provider), mapping.CASBackend.SecretName, mapping.CASBackend.OrganizationID, buf, digest)
+
+	// Checked before the error because a writer refusing to grow surfaces as a
+	// download failure, and because the bound must hold even if the client
+	// swallows the write error.
+	if buf.exceeded {
+		s.log.Warnw("msg", "policy evaluations bundle exceeded the cap while downloading", "digest", digest, "claimedSize", bundleSize, "max", maxInlineBytes)
+		// The claimed size is known to be wrong, so no size is reported at all.
+		return tooLargePolicyEvaluations(digest, 0, mediaType)
+	}
+
 	if err != nil {
 		s.log.Warnw("msg", "downloading policy evaluations bundle", "digest", digest, "err", err)
 		return unavailablePolicyEvaluations(digest, bundleSize, mediaType)
@@ -176,6 +199,34 @@ func (s *WorkflowRunService) resolvePolicyEvaluations(
 	_ = s.policyEvalCache.Set(ctx, digest, data)
 
 	return s.decodePolicyEvaluations(data, digest, mediaType)
+}
+
+// boundedBuffer accumulates bytes in memory up to a limit and refuses the write
+// that would exceed it, recording that it did. It exists so the policy
+// evaluations cap is enforced against the bytes actually received rather than
+// against the size the reference claims, which is client-influenced and may be
+// zero or under-reported.
+type boundedBuffer struct {
+	buf      bytes.Buffer
+	limit    int64
+	written  int64
+	exceeded bool
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if b.written+int64(len(p)) > b.limit {
+		b.exceeded = true
+		return 0, fmt.Errorf("content exceeds the maximum of %d bytes", b.limit)
+	}
+
+	n, err := b.buf.Write(p)
+	b.written += int64(n)
+
+	return n, err
+}
+
+func (b *boundedBuffer) Bytes() []byte {
+	return b.buf.Bytes()
 }
 
 // decodePolicyEvaluations reports the bytes actually read rather than the size
